@@ -11,17 +11,11 @@ from aiogram import Bot
 # НАСТРОЙКИ
 # ============================================================
 
-# Токен и chat_id берём из переменных окружения (GitHub Secrets),
-# никогда не хардкодим в коде!
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])
 
 KWORK_URL = "https://kwork.ru/projects"
-
-# Файл, в котором храним id уже виденных заказов между запусками
 SEEN_FILE = "seen_orders.json"
-
-# Сколько последних id храним (чтобы файл не рос бесконечно)
 MAX_SEEN = 1000
 
 HEADERS = {
@@ -38,35 +32,35 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-bot = Bot(token=BOT_TOKEN)
-
 
 # ============================================================
-# ХРАНЕНИЕ УЖЕ ВИДЕННЫХ ЗАКАЗОВ (файл вместо памяти процесса)
+# ХРАНЕНИЕ УЖЕ ВИДЕННЫХ ЗАКАЗОВ (Сохраняем порядок)
 # ============================================================
 
 def load_seen_orders():
+    """Возвращает список ID с сохранением порядка и флаг первого запуска."""
     if not os.path.exists(SEEN_FILE):
-        return set(), True  # (пусто, это первый запуск)
+        return [], True
 
     try:
         with open(SEEN_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return set(data), False
+            # Приводим все элементы к str на случай сбоев типов
+            return [str(item) for item in data], False
     except (json.JSONDecodeError, OSError):
         logging.warning("Не удалось прочитать seen_orders.json, считаем первым запуском")
-        return set(), True
+        return [], True
 
 
-def save_seen_orders(seen_orders):
-    # Оставляем только последние MAX_SEEN, чтобы файл не рос вечно
-    trimmed = list(seen_orders)[-MAX_SEEN:]
+def save_seen_orders(seen_orders_list):
+    """Сохраняет только последние MAX_SEEN элементов, сохраняя хронологию."""
+    trimmed = seen_orders_list[-MAX_SEEN:]
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(trimmed, f, ensure_ascii=False)
+        json.dump(trimmed, f, ensure_ascii=False, indent=2)
 
 
 # ============================================================
-# ПОЛУЧЕНИЕ ПЕРВОЙ СТРАНИЦЫ KWORK
+# ПОЛУЧЕНИЕ И ПАРСИНГ СТРАНИЦЫ
 # ============================================================
 
 async def get_page(session):
@@ -101,10 +95,6 @@ async def get_page(session):
     return None
 
 
-# ============================================================
-# ИЗВЛЕЧЕНИЕ МАССИВА wants
-# ============================================================
-
 def extract_orders(page):
     marker = '"wants":'
     position = page.find(marker)
@@ -137,10 +127,6 @@ def extract_orders(page):
     return orders
 
 
-# ============================================================
-# ПОЛУЧЕНИЕ ЗАКАЗОВ
-# ============================================================
-
 async def fetch_orders(session):
     page = await get_page(session)
     if page is None:
@@ -155,7 +141,7 @@ async def fetch_orders(session):
 # ОТПРАВКА НОВОГО ЗАКАЗА
 # ============================================================
 
-async def send_order(order):
+async def send_order(bot: Bot, order: dict):
     order_id = order.get("id")
     title = order.get("name") or "Без названия"
     description = order.get("description") or "Без описания"
@@ -191,54 +177,62 @@ async def send_order(order):
 
 
 # ============================================================
-# ОДНОРАЗОВАЯ ПРОВЕРКА (адаптировано под GitHub Actions)
+# ОДНОРАЗОВАЯ ПРОВЕРКА
 # ============================================================
 
 async def check_kwork_once():
-    seen_orders, first_check = load_seen_orders()
+    seen_orders_list, first_check = load_seen_orders()
+    seen_set = set(seen_orders_list)
 
+    bot = Bot(token=BOT_TOKEN)
     connector = aiohttp.TCPConnector(limit=5, ttl_dns_cache=300)
 
-    async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
-        orders = await fetch_orders(session)
+    try:
+        async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
+            orders = await fetch_orders(session)
 
-        if orders is None:
-            logging.warning("Kwork не ответил, состояние не меняем")
-            return
+            if not orders:
+                if orders is None:
+                    logging.warning("Kwork не ответил, состояние не меняем")
+                else:
+                    logging.warning("Kwork вернул 0 заказов")
+                return
 
-        if not orders:
-            logging.warning("Kwork вернул 0 заказов")
-            return
+            if first_check:
+                for order in orders:
+                    order_id = str(order.get("id"))
+                    if order_id and order_id not in seen_set:
+                        seen_set.add(order_id)
+                        seen_orders_list.append(order_id)
 
-        if first_check:
+                logging.info(f"Первый запуск: запомнено {len(seen_orders_list)} заказов, уведомления не шлём")
+                save_seen_orders(seen_orders_list)
+                return
+
+            new_orders = []
             for order in orders:
                 order_id = order.get("id")
-                if order_id:
-                    seen_orders.add(str(order_id))
+                if not order_id:
+                    continue
 
-            logging.info(f"Первый запуск: запомнено {len(seen_orders)} заказов, уведомления не шлём")
-            save_seen_orders(seen_orders)
-            return
+                order_id = str(order_id)
+                if order_id not in seen_set:
+                    seen_set.add(order_id)
+                    seen_orders_list.append(order_id)
+                    new_orders.append(order)
 
-        new_orders = []
-        for order in orders:
-            order_id = order.get("id")
-            if not order_id:
-                continue
+            if not new_orders:
+                logging.info("Новых заказов нет")
+            else:
+                logging.info(f"🔥 НАЙДЕНО НОВЫХ ЗАКАЗОВ: {len(new_orders)}")
+                for order in reversed(new_orders):
+                    await send_order(bot, order)
 
-            order_id = str(order_id)
-            if order_id not in seen_orders:
-                seen_orders.add(order_id)
-                new_orders.append(order)
+            save_seen_orders(seen_orders_list)
 
-        if not new_orders:
-            logging.info("Новых заказов нет")
-        else:
-            logging.info(f"🔥 НАЙДЕНО НОВЫХ ЗАКАЗОВ: {len(new_orders)}")
-            for order in reversed(new_orders):
-                await send_order(order)
-
-        save_seen_orders(seen_orders)
+    finally:
+        # Сессия бота корректно закрывается при завершении
+        await bot.session.close()
 
 
 # ============================================================
