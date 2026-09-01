@@ -3,9 +3,6 @@ name: Kwork Monitor
 on:
   schedule:
     # Каждые 5 минут (минимальная гранулярность cron в GitHub Actions).
-    # Реальное время запуска может плавать на несколько минут при
-    # высокой нагрузке на инфраструктуру GitHub — это ограничение
-    # платформы, а не workflow.
     - cron: '*/5 * * * *'
   # Позволяет запустить проверку вручную из вкладки Actions
   workflow_dispatch:
@@ -36,8 +33,9 @@ jobs:
 
       - name: Save seen_orders.json back to repo
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add seen_orders.json
           git diff --cached --quiet || git commit -m "Update seen orders [skip ci]"
+          git pull --rebase origin main
           git push
