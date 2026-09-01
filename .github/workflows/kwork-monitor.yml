@@ -1,0 +1,43 @@
+name: Kwork Monitor
+
+on:
+  schedule:
+    # Каждые 5 минут (минимальная гранулярность cron в GitHub Actions).
+    # Реальное время запуска может плавать на несколько минут при
+    # высокой нагрузке на инфраструктуру GitHub — это ограничение
+    # платформы, а не workflow.
+    - cron: '*/5 * * * *'
+  # Позволяет запустить проверку вручную из вкладки Actions
+  workflow_dispatch:
+
+permissions:
+  contents: write  # нужно, чтобы workflow мог закоммитить seen_orders.json обратно
+
+jobs:
+  check-kwork:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install aiohttp aiogram
+
+      - name: Run Kwork check
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python kwork_monitor.py
+
+      - name: Save seen_orders.json back to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen_orders.json
+          git diff --cached --quiet || git commit -m "Update seen orders [skip ci]"
+          git push
