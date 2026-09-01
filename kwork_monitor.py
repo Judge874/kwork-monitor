@@ -21,7 +21,7 @@ CHAT_ID = int(CHAT_ID)
 KWORK_URL = "https://kwork.ru/projects"
 SEEN_FILE = "seen_orders.json"
 MAX_SEEN = 1000
-CHECK_INTERVAL = 30  # Проверка каждые 30 секунд
+CHECK_INTERVAL = 180  # Проверка каждые 180 секунд
 
 HEADERS = {
     "User-Agent": (
