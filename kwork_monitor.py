@@ -4,8 +4,8 @@ import logging
 import os
 import html
 import aiohttp
+from aiohttp import web
 from aiogram import Bot
-
 
 # ============================================================
 # НАСТРОЙКИ
@@ -29,37 +29,29 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": (
-        "text/html,application/xhtml+xml,"
-        "application/xml;q=0.9,*/*;q=0.8"
-    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
     "Connection": "keep-alive",
 }
 
-
 # ============================================================
-# ХРАНЕНИЕ УЖЕ ВИДЕННЫХ ЗАКАЗОВ
+# ХРАНЕНИЕ ЗАКАЗОВ
 # ============================================================
 
 def load_seen_orders():
     if not os.path.exists(SEEN_FILE):
         return [], True
-
     try:
         with open(SEEN_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             return [str(item) for item in data], False
     except (json.JSONDecodeError, OSError):
-        logging.warning("Не удалось прочитать seen_orders.json, считаем первым запуском")
         return [], True
-
 
 def save_seen_orders(seen_orders_list):
     trimmed = seen_orders_list[-MAX_SEEN:]
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(trimmed, f, ensure_ascii=False, indent=2)
-
 
 # ============================================================
 # ПАРСИНГ И ОТПРАВКА
@@ -72,51 +64,32 @@ async def get_page(session):
             headers=HEADERS,
             timeout=aiohttp.ClientTimeout(total=10, connect=5, sock_read=8)
         ) as response:
-
             if response.status != 200:
-                logging.error(f"Kwork вернул HTTP {response.status}")
                 return None
-
             raw = await response.read()
-
             try:
-                page = raw.decode("utf-8")
+                return raw.decode("utf-8")
             except UnicodeDecodeError:
-                page = raw.decode("cp1251", errors="replace")
-
-            return page
-
-    except asyncio.TimeoutError:
-        logging.warning("⏱ Kwork не ответил вовремя. Пропускаем.")
-    except aiohttp.ClientError as e:
-        logging.warning(f"Ошибка соединения с Kwork: {e}")
-    except Exception:
-        logging.exception("Неизвестная ошибка Kwork")
-
+                return raw.decode("cp1251", errors="replace")
+    except Exception as e:
+        logging.warning(f"Ошибка получения страницы: {e}")
     return None
-
 
 def extract_orders(page):
     marker = '"wants":'
     position = page.find(marker)
     if position == -1:
         return []
-
     start = position + len(marker)
     while start < len(page) and page[start].isspace():
         start += 1
-
     if start >= len(page) or page[start] != "[":
         return []
-
-    decoder = json.JSONDecoder()
     try:
-        orders, _ = decoder.raw_decode(page[start:])
+        orders, _ = json.JSONDecoder().raw_decode(page[start:])
+        return orders if isinstance(orders, list) else []
     except json.JSONDecodeError:
         return []
-
-    return orders if isinstance(orders, list) else []
-
 
 async def send_order(bot: Bot, order: dict):
     order_id = order.get("id")
@@ -138,28 +111,23 @@ async def send_order(bot: Bot, order: dict):
 
     try:
         await bot.send_message(
-            chat_id=CHAT_ID,
-            text=message,
-            parse_mode="HTML",
-            disable_web_page_preview=True
+            chat_id=CHAT_ID, text=message, parse_mode="HTML", disable_web_page_preview=True
         )
         logging.info(f"📨 Новый заказ отправлен: {title}")
     except Exception:
         logging.exception("Ошибка отправки заказа в Telegram")
 
-
 # ============================================================
-# ОСНОВНОЙ ЦИКЛ 24/7
+# ФОНОВЫЙ ПАРСЕР
 # ============================================================
 
-async def main():
+async def monitor_task():
     seen_orders_list, first_check = load_seen_orders()
     seen_set = set(seen_orders_list)
-
     bot = Bot(token=BOT_TOKEN)
     connector = aiohttp.TCPConnector(limit=5, ttl_dns_cache=300)
 
-    logging.info("🚀 Парсер Kwork запущен 24/7!")
+    logging.info("🚀 Парсер Kwork запущен!")
 
     try:
         async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
@@ -168,7 +136,6 @@ async def main():
                     page = await get_page(session)
                     if page:
                         orders = extract_orders(page)
-
                         if orders:
                             if first_check:
                                 for order in orders:
@@ -176,7 +143,6 @@ async def main():
                                     if order_id and order_id not in seen_set:
                                         seen_set.add(order_id)
                                         seen_orders_list.append(order_id)
-                                logging.info(f"Первый запуск: запомнено {len(seen_orders_list)} заказов.")
                                 save_seen_orders(seen_orders_list)
                                 first_check = False
                             else:
@@ -193,19 +159,29 @@ async def main():
                                     for order in reversed(new_orders):
                                         await send_order(bot, order)
                                     save_seen_orders(seen_orders_list)
-
                 except Exception as e:
-                    logging.error(f"Ошибка в цикле проверки: {e}")
+                    logging.error(f"Ошибка в цикле парсинга: {e}")
 
                 await asyncio.sleep(CHECK_INTERVAL)
-
     finally:
         await bot.session.close()
 
+# ============================================================
+# МИНИМАЛЬНЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER FREE TIER
+# ============================================================
+
+async def handle_ping(request):
+    return web.Response(text="Kwork Monitor is running!")
+
+async def start_app():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    
+    # Запускаем парсер как фоновую задачу asyncio
+    asyncio.create_task(monitor_task())
+    return app
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s"
-    )
-    asyncio.run(main())
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    port = int(os.environ.get("PORT", 10000))
+    web.run_app(start_app(), host="0.0.0.0", port=port)
